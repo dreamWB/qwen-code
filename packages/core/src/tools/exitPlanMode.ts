@@ -17,6 +17,7 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -157,6 +158,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       try {
         this.config.savePlan(plan);
       } catch (error) {
+        // Re-throw configuration errors so the outer catch surfaces them to the
+        // user. Transient I/O failures (disk full, permissions) are swallowed
+        // because the session can still continue without the saved plan.
+        if (error instanceof FatalConfigError) {
+          throw error;
+        }
         debugLogger.warn(
           `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -174,6 +181,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         },
       };
     } catch (error) {
+      if (error instanceof FatalConfigError) {
+        throw error;
+      }
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(

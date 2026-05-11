@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 describe('ExitPlanModeTool', () => {
   let tool: ExitPlanModeTool;
@@ -290,6 +291,29 @@ describe('ExitPlanModeTool', () => {
 
       // Plan should NOT be saved when rejected
       expect(mockConfig.savePlan).not.toHaveBeenCalled();
+    });
+
+    it('should propagate FatalConfigError from savePlan through execute()', async () => {
+      const params: ExitPlanModeParams = {
+        plan: 'A plan that triggers config error',
+      };
+      const signal = new AbortController().signal;
+      const configError = new FatalConfigError(
+        'plansDirectory must not contain null bytes.',
+      );
+      vi.mocked(mockConfig.savePlan).mockImplementationOnce(() => {
+        throw configError;
+      });
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      await expect(invocation.execute(signal)).rejects.toThrow(
+        FatalConfigError,
+      );
     });
 
     it('should have correct description', () => {

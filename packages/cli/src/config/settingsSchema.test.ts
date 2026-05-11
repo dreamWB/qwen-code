@@ -28,6 +28,7 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
+        'proxy',
         'plansDirectory',
       ];
 

@@ -783,7 +783,18 @@ export class Config {
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
-  private readonly plansDir: string;
+  /**
+   * Raw `plansDirectory` value carried from settings, kept as-is for lazy
+   * resolution. `undefined` means "use the global default".
+   */
+  private readonly plansDirectoryConfig: string | undefined;
+  /**
+   * Resolved plans directory, populated on first call to {@link getPlansDir}.
+   * Lazy initialization keeps construction side-effect-free (no filesystem
+   * lookups, no path validation) so test fixtures and bare-mode startup
+   * never have to mock the entire `node:os` surface.
+   */
+  private plansDirCache: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -810,7 +821,7 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
-    this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
+    this.plansDirectoryConfig = params.plansDirectory;
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -2120,16 +2131,28 @@ export class Config {
 
   /**
    * Returns the directory where this session's plan file is stored.
+   *
+   * Resolved lazily on first access: validation of `plansDirectory` (path
+   * traversal checks, symlink resolution) happens here rather than in the
+   * constructor, which keeps `new Config()` free of filesystem side effects.
+   * If the configured value is invalid, this throws `FatalConfigError` —
+   * fail-fast at first plan-mode use rather than at startup.
    */
   getPlansDir(): string {
-    return this.plansDir;
+    if (this.plansDirCache === undefined) {
+      this.plansDirCache = Storage.getPlansDir(
+        this.targetDir,
+        this.plansDirectoryConfig,
+      );
+    }
+    return this.plansDirCache;
   }
 
   /**
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return path.join(this.plansDir, `${this.sessionId}.md`);
+    return path.join(this.getPlansDir(), `${this.sessionId}.md`);
   }
 
   /**

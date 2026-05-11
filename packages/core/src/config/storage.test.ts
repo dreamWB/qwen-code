@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -179,45 +179,31 @@ describe('Storage – getPlansDir', () => {
     expect(Storage.getPlansDir(projectRoot, plansDir)).toBe(plansDir);
   });
 
-  it('rejects relative plansDirectory values that escape the project root', () => {
-    expect(() => Storage.getPlansDir(projectRoot, '../plans')).toThrow(
-      'plansDirectory must resolve within the project root',
-    );
+  it('allows plansDirectory values outside the project root', () => {
+    // No within-project restriction — any resolvable path is accepted.
+    expect(() =>
+      Storage.getPlansDir(projectRoot, '../sibling-plans'),
+    ).not.toThrow();
   });
 
-  it('rejects absolute plansDirectory values outside the project root', () => {
+  it('allows absolute plansDirectory values outside the project root', () => {
     const outsideProject = path.join(path.dirname(projectRoot), 'plans');
-    expect(() => Storage.getPlansDir(projectRoot, outsideProject)).toThrow(
-      'plansDirectory must resolve within the project root',
-    );
+    expect(() =>
+      Storage.getPlansDir(projectRoot, outsideProject),
+    ).not.toThrow();
   });
 
-  it('rejects Windows-style absolute path outside the project root', () => {
-    // Simulate project root on C: drive and plansDirectory on D: drive
-    const projectOnC = path.resolve('C:', 'work', 'project');
-    const plansOnD = path.resolve('D:', 'plans');
-    expect(() => Storage.getPlansDir(projectOnC, plansOnD)).toThrow(
-      'plansDirectory must resolve within the project root',
-    );
+  it('resolves relative path without projectRoot using process.cwd()', () => {
+    // When projectRoot is omitted, relative paths resolve against cwd.
+    const result = Storage.getPlansDir(undefined, './my-plans');
+    expect(result).toBe(path.resolve(process.cwd(), 'my-plans'));
   });
 
-  it('rejects path with mixed separators that escapes project root', () => {
-    // On Windows, path.resolve normalizes backslashes as path separators.
-    // On POSIX, backslashes are literal characters, so this traversal
-    // is inherently Windows-specific and should be guarded.
-    if (process.platform !== 'win32') {
-      return;
-    }
-    const tricky = '..\\..\\plans'; // backslashes with traversal
-    expect(() => Storage.getPlansDir(projectRoot, tricky)).toThrow(
-      'plansDirectory must resolve within the project root',
-    );
-  });
-
-  it('rejects symlink pointing outside the project root', () => {
+  it('warns via stderr when plansDirectory contains a symlink pointing outside', () => {
     const tmp = fs.mkdtempSync(path.join(tmpdir(), 'qwen-test-'));
     const project = path.join(tmp, 'project');
     const outside = path.join(tmp, 'outside');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       fs.mkdirSync(project, { recursive: true });
       fs.mkdirSync(outside, { recursive: true });
@@ -225,26 +211,25 @@ describe('Storage – getPlansDir', () => {
       try {
         fs.symlinkSync(outside, symlink, 'dir');
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === 'EPERM') {
-          // Symlink creation requires elevated privileges on some
-          // platforms (e.g. Windows without Developer Mode).
-          return;
-        }
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
         throw err;
       }
-
-      expect(() => Storage.getPlansDir(project, './escape-link')).toThrow(
-        'plansDirectory must resolve within the project root',
+      const result = Storage.getPlansDir(project, './escape-link');
+      expect(result).toBe(fs.realpathSync(outside));
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('symbolic link'),
       );
     } finally {
+      stderrSpy.mockRestore();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('allows legitimate symlink that stays within project root', () => {
+  it('resolves symlink that stays within project root and warns', () => {
     const tmp = fs.mkdtempSync(path.join(tmpdir(), 'qwen-test-'));
     const project = path.join(tmp, 'project');
     const target = path.join(project, 'plans-target');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       fs.mkdirSync(project, { recursive: true });
       fs.mkdirSync(target, { recursive: true });
@@ -252,53 +237,114 @@ describe('Storage – getPlansDir', () => {
       try {
         fs.symlinkSync(target, symlink, 'dir');
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === 'EPERM') {
-          return;
-        }
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
         throw err;
       }
-
       const result = Storage.getPlansDir(project, './plans-link');
-      // realpathSync resolves the symlink, so result should equal the target
-      expect(result).toBe(target);
+      // realpathSync resolves the symlink to the target.
+      // Also resolve the expected target to handle platforms (e.g. macOS) where
+      // tmpdir() itself contains symlinks like /var -> /private/var.
+      expect(result).toBe(fs.realpathSync(target));
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('symbolic link'),
+      );
     } finally {
+      stderrSpy.mockRestore();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('rejects intermediate symlink component that escapes project root', () => {
+  it('warns via stderr on intermediate symlink pointing outside', () => {
     const tmp = fs.mkdtempSync(path.join(tmpdir(), 'qwen-test-'));
     const project = path.join(tmp, 'project');
     const outside = path.join(tmp, 'outside');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       fs.mkdirSync(project, { recursive: true });
       fs.mkdirSync(outside, { recursive: true });
-      // Create a symlink at project/data → outside
       const dataSymlink = path.join(project, 'data');
       try {
         fs.symlinkSync(outside, dataSymlink, 'dir');
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === 'EPERM') {
-          return;
-        }
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
         throw err;
       }
-
-      // plansDirectory is set to "./data/plans" — the "data" component
-      // is a symlink to outside, so the resolved target is outside/plans
-      // which is outside the project root.
-      expect(() => Storage.getPlansDir(project, './data/plans')).toThrow(
-        'plansDirectory must resolve within the project root',
+      // "./data" is a symlink to outside; "./data/plans" resolves there.
+      const result = Storage.getPlansDir(project, './data/plans');
+      expect(result).toBe(path.join(fs.realpathSync(outside), 'plans'));
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('symbolic link'),
       );
     } finally {
+      stderrSpy.mockRestore();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('uses configured plansDirectory when building plan file paths', () => {
-    expect(Storage.getPlanFilePath('session-123', projectRoot, './plans')).toBe(
-      path.join(projectRoot, 'plans', 'session-123.md'),
+  it('warns via stderr on T3 intermediate symlink with non-existing leaf', () => {
+    // T3: symlink several levels above the leaf, leaf directory not yet created.
+    const tmp = fs.mkdtempSync(path.join(tmpdir(), 'qwen-test-'));
+    const project = path.join(tmp, 'project');
+    const outside = path.join(tmp, 'outside');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      fs.mkdirSync(project, { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      const symlink = path.join(project, 'escape');
+      try {
+        fs.symlinkSync(outside, symlink, 'dir');
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw err;
+      }
+      // "sub/leaf" beneath the symlink does not exist yet.
+      const result = Storage.getPlansDir(project, './escape/sub/leaf');
+      expect(result).toBe(path.join(fs.realpathSync(outside), 'sub', 'leaf'));
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('symbolic link'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects null bytes in plansDirectory', () => {
+    expect(() => Storage.getPlansDir(projectRoot, 'plans\x00/../etc')).toThrow(
+      'plansDirectory must not contain null bytes',
     );
+  });
+
+  it('rejects non-string plansDirectory values', () => {
+    // settings.json is parsed structurally; an array, object, or number
+    // can land here at runtime even though the TypeScript type says string.
+    const arrayValue = ['./plans'] as unknown as string;
+    expect(() => Storage.getPlansDir(projectRoot, arrayValue)).toThrow(
+      'plansDirectory must be a string',
+    );
+    const numberValue = 42 as unknown as string;
+    expect(() => Storage.getPlansDir(projectRoot, numberValue)).toThrow(
+      'plansDirectory must be a string',
+    );
+  });
+
+  it('treats empty/whitespace plansDirectory as unset', () => {
+    expect(Storage.getPlansDir(projectRoot, '')).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'plans'),
+    );
+    expect(Storage.getPlansDir(projectRoot, '   ')).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'plans'),
+    );
+  });
+
+  it('expands tilde (~/) in plansDirectory', () => {
+    const result = Storage.getPlansDir(projectRoot, '~/my-plans');
+    expect(result).toBe(path.join(os.homedir(), 'my-plans'));
+  });
+
+  it('expands bare tilde (~) in plansDirectory to home directory', () => {
+    const result = Storage.getPlansDir(projectRoot, '~');
+    expect(result).toBe(os.homedir());
   });
 });
 

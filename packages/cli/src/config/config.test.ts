@@ -3164,15 +3164,14 @@ describe('loadCliConfig plansDirectory', () => {
     expect(config.getPlanFilePath()).toContain(path.join(cwd, 'project-plans'));
   });
 
-  it('should reject plansDirectory values outside cwd', async () => {
+  it('should allow plansDirectory values outside cwd', async () => {
+    // No within-project restriction — any resolvable path is accepted.
     const argv = await parseArguments();
     const cwd = path.resolve('workspace', 'my-project');
     const settings: Settings = {
       plansDirectory: '../plans',
     };
-
-    await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
-      'plansDirectory must resolve within the project root',
-    );
+    const config = await loadCliConfig(settings, argv, cwd);
+    expect(() => config.getPlansDir()).not.toThrow();
   });
 });

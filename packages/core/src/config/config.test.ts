@@ -1918,14 +1918,13 @@ describe('setApprovalMode with folder trust', () => {
       );
     });
 
-    it('should reject configured plansDirectory outside targetDir', () => {
-      expect(
-        () =>
-          new Config({
-            ...baseParams,
-            plansDirectory: '../project-plans',
-          }),
-      ).toThrow('plansDirectory must resolve within the project root');
+    it('should allow configured plansDirectory outside targetDir', () => {
+      // No within-project restriction: any resolvable path is accepted.
+      const config = new Config({
+        ...baseParams,
+        plansDirectory: '../project-plans',
+      });
+      expect(() => config.getPlansDir()).not.toThrow();
     });
   });
 

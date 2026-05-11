@@ -181,101 +181,115 @@ export class Storage {
   }
 
   /**
-   * Checks whether {@link childPath} resides within {@link parentPath},
-   * resolving symbolic links to prevent traversal bypass attacks.
+   * Resolves {@link p} via {@link fs.realpathSync}. If {@link p} does not
+   * exist, walks up the ancestor chain until an existing component is found,
+   * then re-appends the non-existing suffix to the resolved real ancestor.
+   *
+   * This ensures every existing component is followed through symlinks,
+   * including intermediate ones (e.g. `a/b -> /outside` with configured path
+   * `a/b/c/plans` where `a/b/c` does not yet exist).
+   *
+   * If even the filesystem root is ENOENT, the syntactic input is returned.
    */
-  private static isPathWithinDirectory(
-    childPath: string,
-    parentPath: string,
-  ): boolean {
-    let realParent: string;
-    try {
-      realParent = fs.realpathSync(parentPath);
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        realParent = parentPath;
-      } else {
-        throw err;
-      }
-    }
-
-    let realChild: string;
-    try {
-      realChild = fs.realpathSync(childPath);
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err;
-      }
-      // Path does not exist yet (e.g. the plans directory hasn't been
-      // created). Resolve the deepest existing parent to detect
-      // intermediate symlink components.
-      const childParent = path.dirname(childPath);
-      let realChildParent: string;
+  private static realpathOrDeepestExisting(p: string): string {
+    const segments: string[] = [];
+    let current = p;
+    while (true) {
       try {
-        realChildParent = fs.realpathSync(childParent);
-      } catch (innerErr: unknown) {
-        if ((innerErr as NodeJS.ErrnoException).code === 'ENOENT') {
-          // Even the parent doesn't exist — fall back to syntactic
-          // validation. A fully non-existent path under the project
-          // root is safe.
-          realChildParent = childParent;
-        } else {
-          throw innerErr;
+        const real = fs.realpathSync(current);
+        if (segments.length === 0) {
+          return real;
         }
+        return path.join(real, ...segments.slice().reverse());
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw err;
+        }
+        const parent = path.dirname(current);
+        if (parent === current) {
+          return p;
+        }
+        segments.push(path.basename(current));
+        current = parent;
       }
-      realChild = path.join(realChildParent, path.basename(childPath));
     }
-
-    const relativePath = path.relative(realParent, realChild);
-    return (
-      relativePath === '' ||
-      (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-    );
   }
 
   static getPlansDir(
     projectRoot?: string,
     plansDirectory?: string | null,
   ): string {
-    const configuredPlansDirectory = plansDirectory?.trim();
-    if (configuredPlansDirectory) {
-      if (!projectRoot) {
-        throw new FatalConfigError(
-          'projectRoot is required when plansDirectory is configured.',
-        );
-      }
-
-      const resolvedProjectRoot = path.resolve(projectRoot);
-      const resolvedPlansDirectory = path.isAbsolute(configuredPlansDirectory)
-        ? path.resolve(configuredPlansDirectory)
-        : path.resolve(resolvedProjectRoot, configuredPlansDirectory);
-
-      if (
-        !Storage.isPathWithinDirectory(
-          resolvedPlansDirectory,
-          resolvedProjectRoot,
-        )
-      ) {
-        throw new FatalConfigError(
-          `plansDirectory must resolve within the project root.`,
-        );
-      }
-
-      return resolvedPlansDirectory;
+    // Default-path branch: nothing to validate.
+    if (plansDirectory == null) {
+      return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
     }
 
-    return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
-  }
+    // Reject non-string values that may slip through `JSON.parse(settings.json)`
+    // before TypeScript narrows them.
+    if (typeof plansDirectory !== 'string') {
+      throw new FatalConfigError(
+        `plansDirectory must be a string, got ${typeof plansDirectory}.`,
+      );
+    }
 
-  static getPlanFilePath(
-    sessionId: string,
-    projectRoot?: string,
-    plansDirectory?: string | null,
-  ): string {
-    return path.join(
-      Storage.getPlansDir(projectRoot, plansDirectory),
-      `${sessionId}.md`,
-    );
+    const configuredPlansDirectory = plansDirectory.trim();
+    if (configuredPlansDirectory === '') {
+      return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
+    }
+
+    // Reject null bytes — Linux/macOS truncate paths at the first NUL,
+    // so "plans\x00/../etc" would silently target a different path.
+    if (configuredPlansDirectory.includes('\x00')) {
+      throw new FatalConfigError('plansDirectory must not contain null bytes.');
+    }
+
+    // Tilde expansion
+    let expanded = configuredPlansDirectory;
+    if (
+      expanded === '~' ||
+      expanded.startsWith('~/') ||
+      expanded.startsWith('~\\')
+    ) {
+      const relativeSegments =
+        expanded === '~'
+          ? []
+          : expanded
+              .slice(2)
+              .split(/[/\\]+/)
+              .filter(Boolean);
+      expanded = path.join(os.homedir(), ...relativeSegments);
+    }
+
+    // Resolve relative paths against the project root (or cwd as fallback).
+    const base = projectRoot ? path.resolve(projectRoot) : process.cwd();
+    const resolvedPath = path.isAbsolute(expanded)
+      ? path.resolve(expanded)
+      : path.resolve(base, expanded);
+
+    const realPath = Storage.realpathOrDeepestExisting(resolvedPath);
+
+    // Detect symlinks introduced by the user-configured portion of the path.
+    // For relative paths we first canonicalize the base so that OS-level
+    // symlinks (e.g. macOS /tmp → /private/tmp) in the project root do not
+    // produce false-positive warnings. For absolute paths we compare against
+    // the syntactic resolved path; system-level symlinks in absolute paths
+    // are an accepted limitation and rarely affect real-world configurations.
+    const realBase = path.isAbsolute(expanded)
+      ? base
+      : Storage.realpathOrDeepestExisting(base);
+    const canonicalResolvedPath = path.isAbsolute(expanded)
+      ? resolvedPath
+      : path.resolve(realBase, expanded);
+    if (realPath !== canonicalResolvedPath) {
+      process.stderr.write(
+        `[qwen] Warning: plansDirectory contains a symbolic link.\n` +
+          `  Configured:  ${configuredPlansDirectory}\n` +
+          `  Resolved to: ${realPath}\n` +
+          `  The symlink target may reside outside the project directory.\n`,
+      );
+    }
+
+    return realPath;
   }
 
   static getGlobalBinDir(): string {
