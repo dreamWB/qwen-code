@@ -31,7 +31,8 @@ describe('keyMatchers', () => {
     [Command.KILL_LINE_LEFT]: (key: Key) => key.ctrl && key.name === 'u',
     [Command.CLEAR_INPUT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.DELETE_WORD_BACKWARD]: (key: Key) =>
-      (key.ctrl || key.meta) && key.name === 'backspace',
+      ((key.ctrl || key.meta) && key.name === 'backspace') ||
+      key.sequence === '\x1f',
     [Command.CLEAR_SCREEN]: (key: Key) => key.ctrl && key.name === 'l',
     [Command.HISTORY_UP]: (key: Key) => key.ctrl && key.name === 'p',
     [Command.HISTORY_DOWN]: (key: Key) => key.ctrl && key.name === 'n',
@@ -73,6 +74,20 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    [Command.SELECT_LEFT]: (key: Key) => key.shift && key.name === 'left',
+    [Command.SELECT_RIGHT]: (key: Key) => key.shift && key.name === 'right',
+    [Command.SELECT_UP]: (key: Key) => key.shift && key.name === 'up',
+    [Command.SELECT_DOWN]: (key: Key) => key.shift && key.name === 'down',
+    [Command.SELECT_WORD_LEFT]: (key: Key) =>
+      key.shift && (key.ctrl || key.meta) && key.name === 'left',
+    [Command.SELECT_WORD_RIGHT]: (key: Key) =>
+      key.shift && (key.ctrl || key.meta) && key.name === 'right',
+    [Command.SELECT_HOME]: (key: Key) => key.shift && key.name === 'home',
+    [Command.SELECT_END]: (key: Key) => key.shift && key.name === 'end',
+    [Command.SELECT_ALL]: (key: Key) =>
+      isWindows
+        ? key.ctrl && key.shift && key.name === 'a'
+        : key.meta && key.name === 'a',
   };
 
   // Test data for each command with positive and negative test cases
@@ -130,6 +145,9 @@ describe('keyMatchers', () => {
       positive: [
         createKey('backspace', { ctrl: true }),
         createKey('backspace', { meta: true }),
+        // MinTTY (Windows Git Bash) emits a bare \x1f byte for Ctrl+Backspace.
+        // Same byte is produced by Ctrl+_ / Ctrl+/ on traditional terminals.
+        createKey('', { sequence: '\x1f' }),
       ],
       negative: [createKey('backspace'), createKey('delete', { ctrl: true })],
     },
@@ -309,6 +327,69 @@ describe('keyMatchers', () => {
         createKey('b', { meta: true }),
         createKey('a', { ctrl: true }),
       ],
+    },
+
+    // Text selection
+    {
+      command: Command.SELECT_LEFT,
+      positive: [createKey('left', { shift: true })],
+      negative: [createKey('left'), createKey('left', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_RIGHT,
+      positive: [createKey('right', { shift: true })],
+      negative: [createKey('right'), createKey('right', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_UP,
+      positive: [createKey('up', { shift: true })],
+      negative: [createKey('up'), createKey('up', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_DOWN,
+      positive: [createKey('down', { shift: true })],
+      negative: [createKey('down'), createKey('down', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_WORD_LEFT,
+      positive: [
+        createKey('left', { shift: true, ctrl: true }),
+        createKey('left', { shift: true, meta: true }),
+      ],
+      negative: [
+        createKey('left', { shift: true }),
+        createKey('left', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.SELECT_WORD_RIGHT,
+      positive: [
+        createKey('right', { shift: true, ctrl: true }),
+        createKey('right', { shift: true, meta: true }),
+      ],
+      negative: [
+        createKey('right', { shift: true }),
+        createKey('right', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.SELECT_HOME,
+      positive: [createKey('home', { shift: true })],
+      negative: [createKey('home'), createKey('home', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_END,
+      positive: [createKey('end', { shift: true })],
+      negative: [createKey('end'), createKey('end', { ctrl: true })],
+    },
+    {
+      command: Command.SELECT_ALL,
+      positive: isWindows
+        ? [createKey('a', { ctrl: true, shift: true })]
+        : [createKey('a', { meta: true })],
+      negative: isWindows
+        ? [createKey('a'), createKey('a', { ctrl: true })]
+        : [createKey('a'), createKey('a', { ctrl: true })],
     },
   ];
 

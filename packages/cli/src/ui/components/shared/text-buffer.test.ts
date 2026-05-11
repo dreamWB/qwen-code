@@ -21,6 +21,7 @@ import {
   findWordEndInLine,
   findNextWordStartInLine,
   isWordCharStrict,
+  getSelectionRange,
   __resetWordSegmenter,
 } from './text-buffer.js';
 import { cpLen } from '../../utils/textUtils.js';
@@ -288,6 +289,304 @@ describe('textBufferReducer', () => {
       expect(state.lines).toEqual(['helloworld']);
       expect(state.cursorRow).toBe(0);
       expect(state.cursorCol).toBe(5);
+    });
+  });
+
+  // Helper: build a state with visualLayout populated (the reducer wrapper
+  // only recomputes layout when `lines` changes).
+  const stateWithLines = (
+    lines: string[],
+    overrides: Partial<TextBufferState> = {},
+  ): TextBufferState => {
+    const base = textBufferReducer(initialState, {
+      type: 'set_text',
+      payload: lines.join('\n'),
+      pushToUndo: false,
+    });
+    return { ...base, ...overrides };
+  };
+
+  describe('getSelectionRange helper', () => {
+    it('returns null when anchor is null', () => {
+      expect(getSelectionRange(initialState)).toBeNull();
+    });
+
+    it('returns null when anchor equals cursor', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 2,
+        selectionAnchor: [0, 2],
+      };
+      expect(getSelectionRange(state)).toBeNull();
+    });
+
+    it('normalizes range when anchor precedes cursor', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 4,
+        selectionAnchor: [0, 1],
+      };
+      expect(getSelectionRange(state)).toEqual({
+        startRow: 0,
+        startCol: 1,
+        endRow: 0,
+        endCol: 4,
+      });
+    });
+
+    it('normalizes range when anchor follows cursor (reverse selection)', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 1,
+        selectionAnchor: [0, 4],
+      };
+      expect(getSelectionRange(state)).toEqual({
+        startRow: 0,
+        startCol: 1,
+        endRow: 0,
+        endCol: 4,
+      });
+    });
+
+    it('handles multi-row selection', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['line1', 'line2', 'line3'],
+        cursorRow: 2,
+        cursorCol: 3,
+        selectionAnchor: [0, 4],
+      };
+      expect(getSelectionRange(state)).toEqual({
+        startRow: 0,
+        startCol: 4,
+        endRow: 2,
+        endCol: 3,
+      });
+    });
+  });
+
+  describe('start_selection action', () => {
+    it('pins anchor to current cursor position', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 3,
+      };
+      const next = textBufferReducer(stateWithText, {
+        type: 'start_selection',
+      });
+      expect(next.selectionAnchor).toEqual([0, 3]);
+    });
+
+    it('is a no-op when anchor is already set', () => {
+      const stateWithAnchor: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 5,
+        selectionAnchor: [0, 1],
+      };
+      const next = textBufferReducer(stateWithAnchor, {
+        type: 'start_selection',
+      });
+      expect(next.selectionAnchor).toEqual([0, 1]);
+    });
+  });
+
+  describe('extend_selection action', () => {
+    it('initializes anchor and moves cursor on first call', () => {
+      const stateWithText = stateWithLines(['hello'], {
+        cursorRow: 0,
+        cursorCol: 2,
+      });
+      const next = textBufferReducer(stateWithText, {
+        type: 'extend_selection',
+        payload: { dir: 'right' },
+      });
+      expect(next.selectionAnchor).toEqual([0, 2]);
+      expect(next.cursorCol).toBe(3);
+    });
+
+    it('preserves existing anchor across multiple extensions', () => {
+      const stateWithText = stateWithLines(['hello world'], {
+        cursorRow: 0,
+        cursorCol: 0,
+      });
+      const after1 = textBufferReducer(stateWithText, {
+        type: 'extend_selection',
+        payload: { dir: 'right' },
+      });
+      const after2 = textBufferReducer(after1, {
+        type: 'extend_selection',
+        payload: { dir: 'right' },
+      });
+      expect(after2.selectionAnchor).toEqual([0, 0]);
+      expect(after2.cursorCol).toBe(2);
+    });
+
+    it('extends by word using wordRight direction', () => {
+      const stateWithText = stateWithLines(['hello world'], {
+        cursorRow: 0,
+        cursorCol: 0,
+      });
+      const next = textBufferReducer(stateWithText, {
+        type: 'extend_selection',
+        payload: { dir: 'wordRight' },
+      });
+      expect(next.selectionAnchor).toEqual([0, 0]);
+      expect(next.cursorCol).toBeGreaterThan(0);
+    });
+  });
+
+  describe('clear_selection action', () => {
+    it('clears the anchor', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 3,
+        selectionAnchor: [0, 0],
+      };
+      const next = textBufferReducer(state, { type: 'clear_selection' });
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('does not mutate state when no anchor', () => {
+      const next = textBufferReducer(initialState, {
+        type: 'clear_selection',
+      });
+      expect(next).toBe(initialState);
+    });
+  });
+
+  describe('select_all action', () => {
+    it('anchors at (0,0) and moves cursor to end of last line', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world!'],
+        cursorRow: 0,
+        cursorCol: 0,
+      };
+      const next = textBufferReducer(state, { type: 'select_all' });
+      expect(next.selectionAnchor).toEqual([0, 0]);
+      expect(next.cursorRow).toBe(1);
+      expect(next.cursorCol).toBe(6);
+    });
+  });
+
+  describe('selection-aware editing', () => {
+    it('insert replaces selection in one undo entry', () => {
+      const stateWithSelection: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 5,
+        selectionAnchor: [0, 0],
+      };
+      const next = textBufferReducer(stateWithSelection, {
+        type: 'insert',
+        payload: 'HI',
+      });
+      expect(next.lines).toEqual(['HI world']);
+      expect(next.cursorCol).toBe(2);
+      expect(next.selectionAnchor).toBeNull();
+      expect(next.undoStack.length).toBe(1);
+    });
+
+    it('backspace deletes selection without per-char traversal', () => {
+      const stateWithSelection: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 11,
+        selectionAnchor: [0, 5],
+      };
+      const next = textBufferReducer(stateWithSelection, { type: 'backspace' });
+      expect(next.lines).toEqual(['hello']);
+      expect(next.cursorCol).toBe(5);
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('delete deletes selection (forward-delete with active selection)', () => {
+      const stateWithSelection: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 5,
+        selectionAnchor: [0, 0],
+      };
+      const next = textBufferReducer(stateWithSelection, { type: 'delete' });
+      expect(next.lines).toEqual([' world']);
+      expect(next.cursorCol).toBe(0);
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('multi-line selection: insert collapses to single line replacement', () => {
+      const stateWithSelection: TextBufferState = {
+        ...initialState,
+        lines: ['abc', 'def', 'ghi'],
+        cursorRow: 2,
+        cursorCol: 2,
+        selectionAnchor: [0, 1],
+      };
+      const next = textBufferReducer(stateWithSelection, {
+        type: 'insert',
+        payload: 'X',
+      });
+      expect(next.lines).toEqual(['aXi']);
+      expect(next.cursorRow).toBe(0);
+      expect(next.cursorCol).toBe(2);
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('paste-equivalent multi-line insert preserves newlines but still replaces selection', () => {
+      const stateWithSelection: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 5,
+        selectionAnchor: [0, 0],
+      };
+      const next = textBufferReducer(stateWithSelection, {
+        type: 'insert',
+        payload: 'multi\nline',
+      });
+      expect(next.lines).toEqual(['multi', 'line world']);
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('move action clears anchor (non-extending cursor movement)', () => {
+      const stateWithSelection = stateWithLines(['hello'], {
+        cursorRow: 0,
+        cursorCol: 3,
+        selectionAnchor: [0, 0],
+      });
+      const next = textBufferReducer(stateWithSelection, {
+        type: 'move',
+        payload: { dir: 'right' },
+      });
+      expect(next.selectionAnchor).toBeNull();
+    });
+
+    it('insert with empty selection (anchor=cursor) leaves anchor cleared after insert', () => {
+      const state: TextBufferState = {
+        ...initialState,
+        lines: ['hi'],
+        cursorRow: 0,
+        cursorCol: 2,
+        selectionAnchor: [0, 2],
+      };
+      const next = textBufferReducer(state, { type: 'insert', payload: 'a' });
+      expect(next.lines).toEqual(['hia']);
+      expect(next.cursorCol).toBe(3);
+      expect(next.selectionAnchor).toBeNull();
     });
   });
 });

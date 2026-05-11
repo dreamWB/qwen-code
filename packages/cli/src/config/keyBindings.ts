@@ -71,6 +71,17 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Text selection
+  SELECT_LEFT = 'selectLeft',
+  SELECT_RIGHT = 'selectRight',
+  SELECT_UP = 'selectUp',
+  SELECT_DOWN = 'selectDown',
+  SELECT_WORD_LEFT = 'selectWordLeft',
+  SELECT_WORD_RIGHT = 'selectWordRight',
+  SELECT_HOME = 'selectHome',
+  SELECT_END = 'selectEnd',
+  SELECT_ALL = 'selectAll',
 }
 
 /**
@@ -120,6 +131,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
     { key: 'backspace', command: true },
+    // MinTTY (Windows Git Bash) emits \x1f for Ctrl+Backspace.
+    // Same byte is produced by Ctrl+_ / Ctrl+/ on traditional terminals,
+    // but qwen-code binds neither so this remapping is additive.
+    { sequence: '\x1f' },
   ],
 
   // Screen control
@@ -196,4 +211,26 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Text selection
+  [Command.SELECT_LEFT]: [{ key: 'left', shift: true }],
+  [Command.SELECT_RIGHT]: [{ key: 'right', shift: true }],
+  [Command.SELECT_UP]: [{ key: 'up', shift: true }],
+  [Command.SELECT_DOWN]: [{ key: 'down', shift: true }],
+  [Command.SELECT_WORD_LEFT]: [
+    { key: 'left', shift: true, ctrl: true },
+    { key: 'left', shift: true, command: true },
+  ],
+  [Command.SELECT_WORD_RIGHT]: [
+    { key: 'right', shift: true, ctrl: true },
+    { key: 'right', shift: true, command: true },
+  ],
+  [Command.SELECT_HOME]: [{ key: 'home', shift: true }],
+  [Command.SELECT_END]: [{ key: 'end', shift: true }],
+  // SELECT_ALL: Cmd+A on mac, Ctrl+Shift+A on Linux/Win
+  // (Ctrl+A is reserved for HOME / emacs line-start)
+  [Command.SELECT_ALL]:
+    process.platform === 'darwin'
+      ? [{ key: 'a', command: true }]
+      : [{ key: 'a', ctrl: true, shift: true }],
 };

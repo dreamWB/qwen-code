@@ -24,6 +24,7 @@ import { useCallback } from 'react';
 import { Box, Text } from 'ink';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
+import { getSelectionRange } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
@@ -84,42 +85,105 @@ export interface BaseTextInputProps {
 // ─── Default line renderer ──────────────────────────────────
 
 /**
- * Renders a single visual line with an inverse-video block cursor.
- * Uses codepoint-aware string operations for Unicode/emoji safety.
+ * Renders a single visual line with an inverse-video block cursor and optional
+ * selection highlight (blue background). Uses codepoint-aware string operations
+ * for Unicode/emoji safety.
  */
 export function defaultRenderLine({
   lineText,
   isOnCursorLine,
   cursorCol,
   showCursor,
+  absoluteVisualIndex,
+  buffer,
 }: RenderLineOptions): React.ReactNode {
-  if (!isOnCursorLine || !showCursor) {
+  const len = cpLen(lineText);
+
+  // Compute selection columns for this visual line (code-point indices).
+  let selStart = 0;
+  let selEnd = 0;
+  if (buffer.selectionAnchor !== null) {
+    const sel = getSelectionRange({
+      selectionAnchor: buffer.selectionAnchor,
+      cursorRow: buffer.cursor[0],
+      cursorCol: buffer.cursor[1],
+    });
+    if (sel) {
+      const mapping = buffer.visualToLogicalMap[absoluteVisualIndex];
+      if (mapping) {
+        const [logRow, startColInLogical] = mapping;
+        if (logRow >= sel.startRow && logRow <= sel.endRow) {
+          let s = 0;
+          let e = len;
+          if (logRow === sel.startRow) {
+            s = Math.max(0, sel.startCol - startColInLogical);
+          }
+          if (logRow === sel.endRow) {
+            e = Math.min(len, sel.endCol - startColInLogical);
+          }
+          if (s < e) {
+            selStart = s;
+            selEnd = e;
+          }
+        }
+      }
+    }
+  }
+
+  const hasSelection = selEnd > selStart;
+  const showCursorHere = isOnCursorLine && showCursor;
+
+  if (!hasSelection && !showCursorHere) {
     return <Text>{lineText || ' '}</Text>;
   }
 
-  const len = cpLen(lineText);
-
-  // Cursor past end of line — append inverse space
-  if (cursorCol >= len) {
+  if (!hasSelection) {
+    // Cursor only (original behavior)
+    if (cursorCol >= len) {
+      return (
+        <Text>
+          {lineText}
+          {chalk.inverse(' ') + '\u200B'}
+        </Text>
+      );
+    }
     return (
       <Text>
-        {lineText}
-        {chalk.inverse(' ') + '\u200B'}
+        {cpSlice(lineText, 0, cursorCol)}
+        {chalk.inverse(cpSlice(lineText, cursorCol, cursorCol + 1))}
+        {cpSlice(lineText, cursorCol + 1)}
       </Text>
     );
   }
 
-  const before = cpSlice(lineText, 0, cursorCol);
-  const cursorChar = cpSlice(lineText, cursorCol, cursorCol + 1);
-  const after = cpSlice(lineText, cursorCol + 1);
+  // Selection active on this line. Build segments between boundary points.
+  // Cursor (if shown) renders as chalk.inverse; selected chars as chalk.bgBlue.
+  const C = showCursorHere && cursorCol < len ? cursorCol : -1;
+  const S = selStart;
+  const E = selEnd;
 
-  return (
-    <Text>
-      {before}
-      {chalk.inverse(cursorChar)}
-      {after}
-    </Text>
-  );
+  const boundarySet = new Set([0, S, E, len]);
+  if (C >= 0) {
+    boundarySet.add(C);
+    boundarySet.add(C + 1);
+  }
+  const boundaries = [...boundarySet].sort((a, b) => a - b);
+
+  const styled = boundaries.slice(0, -1).map((start, i) => {
+    const end = boundaries[i + 1];
+    if (start >= end) return '';
+    const chunk = cpSlice(lineText, start, end);
+    const isCursorSpan = C >= 0 && start === C && end === C + 1;
+    const inSelection = start >= S && end <= E;
+    if (isCursorSpan) return chalk.inverse(chunk);
+    if (inSelection) return chalk.bgBlue(chunk);
+    return chunk;
+  });
+
+  const trailingCursor =
+    showCursorHere && cursorCol >= len ? chalk.inverse(' ') + '\u200B' : '';
+
+  return <Text>{styled.join('') + trailingCursor}</Text>;
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -167,17 +231,21 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
         return;
       }
 
-      // Escape → clear input
+      // Escape → clear selection first; if none, clear input
       if (keyMatchers[Command.ESCAPE](key)) {
-        if (buffer.text.length > 0) {
+        if (buffer.selectionAnchor !== null) {
+          buffer.clearSelection();
+        } else if (buffer.text.length > 0) {
           buffer.setText('');
         }
         return;
       }
 
-      // Ctrl+C → clear input
+      // Ctrl+C → clear selection first; if none, clear input
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
-        if (buffer.text.length > 0) {
+        if (buffer.selectionAnchor !== null) {
+          buffer.clearSelection();
+        } else if (buffer.text.length > 0) {
           buffer.setText('');
         }
         return;
@@ -216,6 +284,53 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
       // Ctrl+X Ctrl+E → open in external editor
       if (keyMatchers[Command.OPEN_EXTERNAL_EDITOR](key)) {
         buffer.openInExternalEditor();
+        return;
+      }
+
+      // ── Text selection ──
+
+      if (keyMatchers[Command.SELECT_ALL](key)) {
+        buffer.selectAll();
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_LEFT](key)) {
+        buffer.extendSelection('left');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_RIGHT](key)) {
+        buffer.extendSelection('right');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_UP](key)) {
+        buffer.extendSelection('up');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_DOWN](key)) {
+        buffer.extendSelection('down');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_WORD_LEFT](key)) {
+        buffer.extendSelection('wordLeft');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_WORD_RIGHT](key)) {
+        buffer.extendSelection('wordRight');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_HOME](key)) {
+        buffer.extendSelection('home');
+        return;
+      }
+
+      if (keyMatchers[Command.SELECT_END](key)) {
+        buffer.extendSelection('end');
         return;
       }
 

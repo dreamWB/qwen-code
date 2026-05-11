@@ -784,6 +784,43 @@ export const replaceRangeInternal = (
   };
 };
 
+/**
+ * Returns the normalized [start, end] coordinates of the current keyboard
+ * selection, or null if no selection is active (anchor is null or anchor
+ * coincides with the cursor).
+ */
+export function getSelectionRange(state: {
+  selectionAnchor: [number, number] | null;
+  cursorRow: number;
+  cursorCol: number;
+}): {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+} | null {
+  if (!state.selectionAnchor) return null;
+  const [anchorRow, anchorCol] = state.selectionAnchor;
+  const { cursorRow, cursorCol } = state;
+  if (anchorRow === cursorRow && anchorCol === cursorCol) return null;
+  const anchorBeforeCursor =
+    anchorRow < cursorRow || (anchorRow === cursorRow && anchorCol < cursorCol);
+  if (anchorBeforeCursor) {
+    return {
+      startRow: anchorRow,
+      startCol: anchorCol,
+      endRow: cursorRow,
+      endCol: cursorCol,
+    };
+  }
+  return {
+    startRow: cursorRow,
+    startCol: cursorCol,
+    endRow: anchorRow,
+    endCol: anchorCol,
+  };
+}
+
 export interface Viewport {
   height: number;
   width: number;
@@ -1233,7 +1270,12 @@ export type TextBufferAction =
   | { type: 'vim_move_to_first_line' }
   | { type: 'vim_move_to_last_line' }
   | { type: 'vim_move_to_line'; payload: { lineNumber: number } }
-  | { type: 'vim_escape_insert_mode' };
+  | { type: 'vim_escape_insert_mode' }
+  // Keyboard text selection (independent of vim visual mode).
+  | { type: 'start_selection' }
+  | { type: 'extend_selection'; payload: { dir: Direction } }
+  | { type: 'clear_selection' }
+  | { type: 'select_all' };
 
 function textBufferReducerLogic(
   state: TextBufferState,
@@ -1265,7 +1307,20 @@ function textBufferReducerLogic(
     }
 
     case 'insert': {
-      const nextState = pushUndoLocal(state);
+      let nextState = pushUndoLocal(state);
+      // If a keyboard selection is active, replace it first (single undo entry).
+      const selectionRange = getSelectionRange(state);
+      if (selectionRange) {
+        nextState = replaceRangeInternal(
+          nextState,
+          selectionRange.startRow,
+          selectionRange.startCol,
+          selectionRange.endRow,
+          selectionRange.endCol,
+          '',
+        );
+      }
+      nextState = { ...nextState, selectionAnchor: null };
       const newLines = [...nextState.lines];
       let newCursorRow = nextState.cursorRow;
       let newCursorCol = nextState.cursorCol;
@@ -1307,6 +1362,20 @@ function textBufferReducerLogic(
     }
 
     case 'backspace': {
+      // If a keyboard selection is active, deleting the range IS the backspace.
+      const selectionRange = getSelectionRange(state);
+      if (selectionRange) {
+        const nextState = pushUndoLocal(state);
+        const cleared = replaceRangeInternal(
+          nextState,
+          selectionRange.startRow,
+          selectionRange.startCol,
+          selectionRange.endRow,
+          selectionRange.endCol,
+          '',
+        );
+        return { ...cleared, selectionAnchor: null, preferredCol: null };
+      }
       const nextState = pushUndoLocal(state);
       const newLines = [...nextState.lines];
       let newCursorRow = nextState.cursorRow;
@@ -1447,9 +1516,11 @@ function textBufferReducerLogic(
               cpLen(lines[logRow] ?? ''),
             ),
             preferredCol: newPreferredCol,
+            // A non-extending cursor movement clears any active selection.
+            selectionAnchor: null,
           };
         }
-        return state;
+        return { ...state, selectionAnchor: null };
       }
 
       // Logical movements
@@ -1521,6 +1592,7 @@ function textBufferReducerLogic(
             cursorRow: newCursorRow,
             cursorCol: newCursorCol,
             preferredCol: null,
+            selectionAnchor: null,
           };
         }
         case 'wordRight': {
@@ -1585,6 +1657,7 @@ function textBufferReducerLogic(
             cursorRow: newCursorRow,
             cursorCol: newCursorCol,
             preferredCol: null,
+            selectionAnchor: null,
           };
         }
         default:
@@ -1596,10 +1669,25 @@ function textBufferReducerLogic(
       return {
         ...state,
         ...action.payload,
+        selectionAnchor: null,
       };
     }
 
     case 'delete': {
+      // If a keyboard selection is active, deleting the range IS the delete.
+      const selectionRange = getSelectionRange(state);
+      if (selectionRange) {
+        const nextState = pushUndoLocal(state);
+        const cleared = replaceRangeInternal(
+          nextState,
+          selectionRange.startRow,
+          selectionRange.startCol,
+          selectionRange.endRow,
+          selectionRange.endCol,
+          '',
+        );
+        return { ...cleared, selectionAnchor: null, preferredCol: null };
+      }
       const { cursorRow, cursorCol, lines } = state;
       const lineContent = currentLine(cursorRow);
       if (cursorCol < currentLineLen(cursorRow)) {
@@ -1822,11 +1910,55 @@ function textBufferReducerLogic(
         cursorRow: newRow,
         cursorCol: newCol,
         preferredCol: null,
+        selectionAnchor: null,
       };
     }
 
     case 'create_undo_snapshot': {
       return pushUndoLocal(state);
+    }
+
+    // Keyboard text selection (independent of vim visual mode).
+    case 'start_selection': {
+      if (state.selectionAnchor) return state;
+      return {
+        ...state,
+        selectionAnchor: [state.cursorRow, state.cursorCol],
+      };
+    }
+    case 'extend_selection': {
+      // Ensure anchor is set (use current cursor as anchor if absent).
+      const anchor: [number, number] = state.selectionAnchor ?? [
+        state.cursorRow,
+        state.cursorCol,
+      ];
+      const stateWithAnchor: TextBufferState =
+        state.selectionAnchor === null
+          ? { ...state, selectionAnchor: anchor }
+          : state;
+      // Reuse the existing `move` logic, then re-pin the anchor (the move case
+      // clears selectionAnchor by design for non-extending cursor movement).
+      const movedState = textBufferReducerLogic(stateWithAnchor, {
+        type: 'move',
+        payload: { dir: action.payload.dir },
+      });
+      return { ...movedState, selectionAnchor: anchor };
+    }
+    case 'clear_selection': {
+      if (state.selectionAnchor === null) return state;
+      return { ...state, selectionAnchor: null };
+    }
+    case 'select_all': {
+      const lastRow = state.lines.length - 1;
+      const lastCol = cpLen(state.lines[lastRow] ?? '');
+      // Anchor at (0,0), cursor at end. No undo push — pure cursor/anchor op.
+      return {
+        ...state,
+        selectionAnchor: [0, 0],
+        cursorRow: lastRow,
+        cursorCol: lastCol,
+        preferredCol: null,
+      };
     }
 
     // Vim-specific operations
@@ -2368,6 +2500,24 @@ export function useTextBuffer({
     dispatch({ type: 'move_to_offset', payload: { offset } });
   }, []);
 
+  // Keyboard text selection dispatchers (paired with reducer actions
+  // start_selection / extend_selection / clear_selection / select_all).
+  const startSelection = useCallback((): void => {
+    dispatch({ type: 'start_selection' });
+  }, []);
+
+  const extendSelection = useCallback((dir: Direction): void => {
+    dispatch({ type: 'extend_selection', payload: { dir } });
+  }, []);
+
+  const clearSelection = useCallback((): void => {
+    dispatch({ type: 'clear_selection' });
+  }, []);
+
+  const selectAll = useCallback((): void => {
+    dispatch({ type: 'select_all' });
+  }, []);
+
   const returnValue: TextBuffer = useMemo(
     () => ({
       lines,
@@ -2395,6 +2545,11 @@ export function useTextBuffer({
       moveToOffset,
       deleteWordLeft,
       deleteWordRight,
+
+      startSelection,
+      extendSelection,
+      clearSelection,
+      selectAll,
 
       killLineRight,
       killLineLeft,
@@ -2458,6 +2613,10 @@ export function useTextBuffer({
       moveToOffset,
       deleteWordLeft,
       deleteWordRight,
+      startSelection,
+      extendSelection,
+      clearSelection,
+      selectAll,
       killLineRight,
       killLineLeft,
       handleInput,
@@ -2574,6 +2733,25 @@ export interface TextBuffer {
    * follows the caret and the next contiguous run of word characters.
    */
   deleteWordRight: () => void;
+
+  /**
+   * Start a keyboard selection at the current cursor position (no-op if a
+   * selection is already active).
+   */
+  startSelection: () => void;
+  /**
+   * Move the cursor in the given direction while preserving (or initializing)
+   * the selection anchor — the visible selection grows or shrinks accordingly.
+   */
+  extendSelection: (dir: Direction) => void;
+  /**
+   * Clear any active selection without moving the cursor.
+   */
+  clearSelection: () => void;
+  /**
+   * Select the entire buffer (anchor at start, cursor at end).
+   */
+  selectAll: () => void;
 
   /**
    * Deletes text from the cursor to the end of the current line.
