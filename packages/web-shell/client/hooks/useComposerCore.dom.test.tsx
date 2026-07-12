@@ -188,6 +188,44 @@ describe('useComposerCore inline tags', () => {
     }
   });
 
+  it('keeps the native title unset when attaching a JSX tooltip fails', async () => {
+    const error = new Error('append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    let readFailingChipTitle: (() => string | null) | null = null;
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.getAttribute('role') === 'tooltip'
+        ) {
+          readFailingChipTitle = () => this.getAttribute('title');
+          throw error;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => <span>Details</span>,
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag tooltip render failed',
+        error,
+      );
+      expect(readFailingChipTitle?.()).toBeNull();
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+    }
+  });
+
   it('guards inline mask icon sources', async () => {
     await mount({
       composerInput: {

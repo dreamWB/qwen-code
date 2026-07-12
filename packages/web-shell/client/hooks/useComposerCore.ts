@@ -579,6 +579,7 @@ type InlineComposerTag = WebShellComposerTag & {
   iconUrl?: string;
   renderContent?: ComposerTagRenderer;
   tooltip?: ReactNode;
+  /** Plain-text native-title fallback when custom tooltip mounting fails. */
   tooltipText?: string;
   onClick?: ComposerTagClickHandler;
 };
